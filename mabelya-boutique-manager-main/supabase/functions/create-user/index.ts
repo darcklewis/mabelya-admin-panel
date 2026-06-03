@@ -6,25 +6,35 @@ const corsHeaders = {
 };
 
 Deno.serve(async (req) => {
+  // Gestion du CORS pour les requêtes de pré-vérification (Preflight)
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
 
   try {
+    // Utilisation des variables d'environnement natives de Supabase Edge Functions
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!; // Clé admin indispensable ici
     const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
 
-    // Verify caller is super_admin
-    const authHeader = req.headers.get("Authorization")!;
+    // 1. Vérifier la présence du token d'authentification
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader) {
+      return new Response(JSON.stringify({ error: "Token d'authentification manquant" }), {
+        status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+    
     const token = authHeader.replace("Bearer ", "");
-    const { data: { user: caller } } = await supabaseAdmin.auth.getUser(token);
-    if (!caller) {
+    const { data: { user: caller }, error: authError } = await supabaseAdmin.auth.getUser(token);
+    
+    if (authError || !caller) {
       return new Response(JSON.stringify({ error: "Non authentifié" }), {
         status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
+    // 2. Vérifier si l'appelant est bien un 'super_admin'
     const { data: roleCheck } = await supabaseAdmin
       .from("user_roles")
       .select("role")
@@ -33,11 +43,12 @@ Deno.serve(async (req) => {
       .single();
 
     if (!roleCheck) {
-      return new Response(JSON.stringify({ error: "Accès refusé" }), {
+      return new Response(JSON.stringify({ error: "Accès refusé : Droits insuffisants" }), {
         status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
+    // 3. Récupérer et valider les données du body
     const { email, password, full_name, role, avatar_url } = await req.json();
 
     if (!email || !password || !full_name || !role) {
@@ -46,37 +57,40 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Create user via admin API (auto-confirms email)
+    // 4. Création de l'utilisateur via l'API Admin (L'email est auto-confirmé)
     const { data: newUser, error: createError } = await supabaseAdmin.auth.admin.createUser({
       email,
       password,
       email_confirm: true,
-      user_metadata: { full_name },
+      user_metadata: { full_name, avatar_url }, // Ajouté ici aussi pour plus de sécurité
     });
 
-    if (createError) {
-      return new Response(JSON.stringify({ error: createError.message }), {
+    if (createError || !newUser.user) {
+      return new Response(JSON.stringify({ error: createError?.message || "Échec de création de l'utilisateur" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    // Assign role
+    // 5. Attribution du rôle dans la table personnalisée
     const { error: roleError } = await supabaseAdmin
       .from("user_roles")
       .insert({ user_id: newUser.user.id, role });
 
     if (roleError) {
-      return new Response(JSON.stringify({ error: roleError.message }), {
+      return new Response(JSON.stringify({ error: `Utilisateur créé mais rôle non attribué : ${roleError.message}` }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    // Update avatar if provided
-    if (avatar_url) {
+    // 6. Mise à jour ou création du profil (utilisation de upsert pour éviter les conflits si un trigger existe)
+    if (avatar_url || full_name) {
       await supabaseAdmin
         .from("profiles")
-        .update({ avatar_url })
-        .eq("user_id", newUser.user.id);
+        .upsert({ 
+          user_id: newUser.user.id, 
+          avatar_url: avatar_url || null,
+          full_name: full_name 
+        }, { onConflict: 'user_id' });
     }
 
     return new Response(
