@@ -61,15 +61,21 @@ export default function Staff() {
     },
   });
 
-  // Ajouter employé
+  // Ajouter employé — Corrigé pour insertion SQL directe (Plus d'Edge Function bloquante)
   const addStaff = useMutation({
     mutationFn: async () => {
       if (!form.full_name.trim()) throw new Error("Le nom est obligatoire");
       if (!form.boutique_id) throw new Error("La boutique est obligatoire");
+      
       const { error } = await supabase.from("staff").insert({
-        ...form,
+        full_name: form.full_name.trim(),
+        boutique_id: form.boutique_id,
+        role: form.role,
+        phone: form.phone.trim() || null,
         salary: parseFloat(form.salary) || 0,
+        is_active: form.is_active,
       });
+
       if (error) throw error;
     },
     onSuccess: () => {
@@ -88,9 +94,9 @@ export default function Staff() {
       const { error } = await supabase
         .from("staff")
         .update({
-          full_name: editForm.full_name,
+          full_name: editForm.full_name.trim(),
           role: editForm.role,
-          phone: editForm.phone || null,
+          phone: editForm.phone.trim() || null,
           salary: parseFloat(editForm.salary) || 0,
           boutique_id: editForm.boutique_id,
           is_active: editForm.is_active,
